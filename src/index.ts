@@ -18,7 +18,7 @@ import open from 'open';
 import os from 'os';
 import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
-import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
+import { listFilters, getFilter, deleteFilter } from "./filter-manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -221,10 +221,6 @@ const ModifyEmailSchema = z.object({
     removeLabelIds: z.array(z.string()).optional().describe("List of label IDs to remove from the message"),
 });
 
-const DeleteEmailSchema = z.object({
-    messageId: z.string().describe("ID of the email message to delete"),
-});
-
 // New schema for listing email labels
 const ListEmailLabelsSchema = z.object({}).describe("Retrieves all available Gmail labels");
 
@@ -260,31 +256,6 @@ const BatchModifyEmailsSchema = z.object({
     batchSize: z.number().optional().default(50).describe("Number of messages to process in each batch (default: 50)"),
 });
 
-const BatchDeleteEmailsSchema = z.object({
-    messageIds: z.array(z.string()).describe("List of message IDs to delete"),
-    batchSize: z.number().optional().default(50).describe("Number of messages to process in each batch (default: 50)"),
-});
-
-// Filter management schemas
-const CreateFilterSchema = z.object({
-    criteria: z.object({
-        from: z.string().optional().describe("Sender email address to match"),
-        to: z.string().optional().describe("Recipient email address to match"),
-        subject: z.string().optional().describe("Subject text to match"),
-        query: z.string().optional().describe("Gmail search query (e.g., 'has:attachment')"),
-        negatedQuery: z.string().optional().describe("Text that must NOT be present"),
-        hasAttachment: z.boolean().optional().describe("Whether to match emails with attachments"),
-        excludeChats: z.boolean().optional().describe("Whether to exclude chat messages"),
-        size: z.number().optional().describe("Email size in bytes"),
-        sizeComparison: z.enum(['unspecified', 'smaller', 'larger']).optional().describe("Size comparison operator")
-    }).describe("Criteria for matching emails"),
-    action: z.object({
-        addLabelIds: z.array(z.string()).optional().describe("Label IDs to add to matching emails"),
-        removeLabelIds: z.array(z.string()).optional().describe("Label IDs to remove from matching emails"),
-        forward: z.string().optional().describe("Email address to forward matching emails to")
-    }).describe("Actions to perform on matching emails")
-}).describe("Creates a new Gmail filter");
-
 const ListFiltersSchema = z.object({}).describe("Retrieves all Gmail filters");
 
 const GetFilterSchema = z.object({
@@ -294,21 +265,6 @@ const GetFilterSchema = z.object({
 const DeleteFilterSchema = z.object({
     filterId: z.string().describe("ID of the filter to delete")
 }).describe("Deletes a Gmail filter");
-
-const CreateFilterFromTemplateSchema = z.object({
-    template: z.enum(['fromSender', 'withSubject', 'withAttachments', 'largeEmails', 'containingText', 'mailingList']).describe("Pre-defined filter template to use"),
-    parameters: z.object({
-        senderEmail: z.string().optional().describe("Sender email (for fromSender template)"),
-        subjectText: z.string().optional().describe("Subject text (for withSubject template)"),
-        searchText: z.string().optional().describe("Text to search for (for containingText template)"),
-        listIdentifier: z.string().optional().describe("Mailing list identifier (for mailingList template)"),
-        sizeInBytes: z.number().optional().describe("Size threshold in bytes (for largeEmails template)"),
-        labelIds: z.array(z.string()).optional().describe("Label IDs to apply"),
-        archive: z.boolean().optional().describe("Whether to archive (skip inbox)"),
-        markAsRead: z.boolean().optional().describe("Whether to mark as read"),
-        markImportant: z.boolean().optional().describe("Whether to mark as important")
-    }).describe("Template-specific parameters")
-}).describe("Creates a filter using a pre-defined template");
 
 const DownloadAttachmentSchema = z.object({
     messageId: z.string().describe("ID of the email message containing the attachment"),
@@ -369,11 +325,6 @@ async function main() {
                 inputSchema: zodToJsonSchema(ModifyEmailSchema),
             },
             {
-                name: "delete_email",
-                description: "Permanently deletes an email",
-                inputSchema: zodToJsonSchema(DeleteEmailSchema),
-            },
-            {
                 name: "list_email_labels",
                 description: "Retrieves all available Gmail labels",
                 inputSchema: zodToJsonSchema(ListEmailLabelsSchema),
@@ -382,11 +333,6 @@ async function main() {
                 name: "batch_modify_emails",
                 description: "Modifies labels for multiple emails in batches",
                 inputSchema: zodToJsonSchema(BatchModifyEmailsSchema),
-            },
-            {
-                name: "batch_delete_emails",
-                description: "Permanently deletes multiple emails in batches",
-                inputSchema: zodToJsonSchema(BatchDeleteEmailsSchema),
             },
             {
                 name: "create_label",
@@ -409,11 +355,6 @@ async function main() {
                 inputSchema: zodToJsonSchema(GetOrCreateLabelSchema),
             },
             {
-                name: "create_filter",
-                description: "Creates a new Gmail filter with custom criteria and actions",
-                inputSchema: zodToJsonSchema(CreateFilterSchema),
-            },
-            {
                 name: "list_filters",
                 description: "Retrieves all Gmail filters",
                 inputSchema: zodToJsonSchema(ListFiltersSchema),
@@ -427,11 +368,6 @@ async function main() {
                 name: "delete_filter",
                 description: "Deletes a Gmail filter",
                 inputSchema: zodToJsonSchema(DeleteFilterSchema),
-            },
-            {
-                name: "create_filter_from_template",
-                description: "Creates a filter using a pre-defined template for common scenarios",
-                inputSchema: zodToJsonSchema(CreateFilterFromTemplateSchema),
             },
             {
                 name: "download_attachment",
@@ -744,23 +680,6 @@ async function main() {
                     };
                 }
 
-                case "delete_email": {
-                    const validatedArgs = DeleteEmailSchema.parse(args);
-                    await gmail.users.messages.delete({
-                        userId: 'me',
-                        id: validatedArgs.messageId,
-                    });
-
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `Email ${validatedArgs.messageId} deleted successfully`,
-                            },
-                        ],
-                    };
-                }
-
                 case "list_email_labels": {
                     const labelResults = await listLabels(gmail);
                     const systemLabels = labelResults.system;
@@ -824,52 +743,6 @@ async function main() {
                     
                     if (failureCount > 0) {
                         resultText += `Failed to process: ${failureCount} messages\n\n`;
-                        resultText += `Failed message IDs:\n`;
-                        resultText += failures.map(f => `- ${(f.item as string).substring(0, 16)}... (${f.error.message})`).join('\n');
-                    }
-
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: resultText,
-                            },
-                        ],
-                    };
-                }
-
-                case "batch_delete_emails": {
-                    const validatedArgs = BatchDeleteEmailsSchema.parse(args);
-                    const messageIds = validatedArgs.messageIds;
-                    const batchSize = validatedArgs.batchSize || 50;
-
-                    // Process messages in batches
-                    const { successes, failures } = await processBatches(
-                        messageIds,
-                        batchSize,
-                        async (batch) => {
-                            const results = await Promise.all(
-                                batch.map(async (messageId) => {
-                                    await gmail.users.messages.delete({
-                                        userId: 'me',
-                                        id: messageId,
-                                    });
-                                    return { messageId, success: true };
-                                })
-                            );
-                            return results;
-                        }
-                    );
-
-                    // Generate summary of the operation
-                    const successCount = successes.length;
-                    const failureCount = failures.length;
-                    
-                    let resultText = `Batch delete operation complete.\n`;
-                    resultText += `Successfully deleted: ${successCount} messages\n`;
-                    
-                    if (failureCount > 0) {
-                        resultText += `Failed to delete: ${failureCount} messages\n\n`;
                         resultText += `Failed message IDs:\n`;
                         resultText += failures.map(f => `- ${(f.item as string).substring(0, 16)}... (${f.error.message})`).join('\n');
                     }
@@ -957,33 +830,7 @@ async function main() {
                 }
 
 
-                // Filter management handlers
-                case "create_filter": {
-                    const validatedArgs = CreateFilterSchema.parse(args);
-                    const result = await createFilter(gmail, validatedArgs.criteria, validatedArgs.action);
-
-                    // Format criteria for display
-                    const criteriaText = Object.entries(validatedArgs.criteria)
-                        .filter(([_, value]) => value !== undefined)
-                        .map(([key, value]) => `${key}: ${value}`)
-                        .join(', ');
-
-                    // Format actions for display
-                    const actionText = Object.entries(validatedArgs.action)
-                        .filter(([_, value]) => value !== undefined && (Array.isArray(value) ? value.length > 0 : true))
-                        .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value}`)
-                        .join(', ');
-
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `Filter created successfully:\nID: ${result.id}\nCriteria: ${criteriaText}\nActions: ${actionText}`,
-                            },
-                        ],
-                    };
-                }
-
+                // Filter management handlers (read/delete only — create_filter removed for security)
                 case "list_filters": {
                     const result = await listFilters(gmail);
                     const filters = result.filters;
@@ -1061,52 +908,6 @@ async function main() {
                     };
                 }
 
-                case "create_filter_from_template": {
-                    const validatedArgs = CreateFilterFromTemplateSchema.parse(args);
-                    const template = validatedArgs.template;
-                    const params = validatedArgs.parameters;
-
-                    let filterConfig;
-                    
-                    switch (template) {
-                        case 'fromSender':
-                            if (!params.senderEmail) throw new Error("senderEmail is required for fromSender template");
-                            filterConfig = filterTemplates.fromSender(params.senderEmail, params.labelIds, params.archive);
-                            break;
-                        case 'withSubject':
-                            if (!params.subjectText) throw new Error("subjectText is required for withSubject template");
-                            filterConfig = filterTemplates.withSubject(params.subjectText, params.labelIds, params.markAsRead);
-                            break;
-                        case 'withAttachments':
-                            filterConfig = filterTemplates.withAttachments(params.labelIds);
-                            break;
-                        case 'largeEmails':
-                            if (!params.sizeInBytes) throw new Error("sizeInBytes is required for largeEmails template");
-                            filterConfig = filterTemplates.largeEmails(params.sizeInBytes, params.labelIds);
-                            break;
-                        case 'containingText':
-                            if (!params.searchText) throw new Error("searchText is required for containingText template");
-                            filterConfig = filterTemplates.containingText(params.searchText, params.labelIds, params.markImportant);
-                            break;
-                        case 'mailingList':
-                            if (!params.listIdentifier) throw new Error("listIdentifier is required for mailingList template");
-                            filterConfig = filterTemplates.mailingList(params.listIdentifier, params.labelIds, params.archive);
-                            break;
-                        default:
-                            throw new Error(`Unknown template: ${template}`);
-                    }
-
-                    const result = await createFilter(gmail, filterConfig.criteria, filterConfig.action);
-
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `Filter created from template '${template}':\nID: ${result.id}\nTemplate used: ${template}`,
-                            },
-                        ],
-                    };
-                }
                 case "download_attachment": {
                     const validatedArgs = DownloadAttachmentSchema.parse(args);
                     
